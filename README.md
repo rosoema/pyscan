@@ -1,6 +1,16 @@
 # Scanner
 
-Lightweight network scanner in Python with minimal dependencies.
+Lightweight network scanner in Python with minimum dependencies.
+
+### Features
+- Auto-detect your IP
+- Port scanning
+- Multiple modes:
+  - Common (1-1023)
+  - Extended (1-10000)
+  - All (1-65535)
+  - Custom range 
+  - Specific ports (comma-separated)
 
 ### Requirements
 - Python 3.x
