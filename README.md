@@ -1,6 +1,6 @@
 # Scanner
 
-Lightweight network scanner written in pure Python with minimal dependencies.
+Lightweight network scanner in Python with minimal dependencies.
 
 ### Requirements
 - Python 3.x
