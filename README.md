@@ -1,4 +1,4 @@
-# Net Scanner
+# Network Scanner
 
 Lightweight network scanner.
 
