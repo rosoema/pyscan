@@ -1,0 +1,2 @@
+# Scanner Dependencies
+# Currently using only Python standard library
