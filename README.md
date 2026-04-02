@@ -1,6 +1,6 @@
 # Scanner
 
-Lightweight network scanner in Python with minimum dependencies.
+Lightweight network scanner.
 
 ### Features
 - Auto-detect your IP
