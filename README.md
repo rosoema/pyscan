@@ -1,6 +1,6 @@
-# Network Scanner
+# PyScan
 
-Lightweight network scanner.
+A lightweight network scanner.
 
 ### Features
 - Auto-detect your IP
