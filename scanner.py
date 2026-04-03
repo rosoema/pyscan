@@ -9,7 +9,22 @@ identification via banner grabbing.
 import socket
 from typing import Iterable, Tuple, List
 
-WEB_PORTS = {80, 443, 8000, 8080, 8443} # TODO: Add more web ports
+WEB_PORTS = {
+    80,
+    443,
+    8000,
+    8080,
+    8443,
+    8888,
+    3000,
+    5000,
+    9000,
+    7000,
+    81,
+    591,
+    593,
+    7070,
+}
 
 MIN_PORT = 1
 MAX_PORT = 65535
