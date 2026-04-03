@@ -110,6 +110,31 @@ def parse_port_list(ports_str: str) -> List[int]:
     
     return ports
 
+def print_progress(current: int, total: int) -> None:
+    """
+    Print progress.
+
+    Args:
+        current: Current iteration.
+        total: Total iterations.
+    """
+    if total <= 0:
+        return
+
+    progress_bar_length = 30
+
+    fraction = current / total
+    filled_length = int(progress_bar_length * fraction)
+
+    bar = "#" * filled_length + "-" * (progress_bar_length - filled_length)
+    percent = int(fraction * 100)
+
+    print(f"\r[{bar}] {percent:3d}% ({current}/{total})", end="", flush=True)
+
+def clear_line() -> None:
+    """Clear the current terminal line."""
+    print("\r" + " " * 80 + "\r", end="")
+
 ### ----------- Socket Utils ----------- ###
 
 def create_socket(sock_type=socket.SOCK_STREAM, timeout: float = 1.0) -> socket.socket:
@@ -310,11 +335,14 @@ def scan_target(target: str, ports: Iterable[int], label: str) -> List[dict]:
     print(f"Scanning {target} - {label}")
     results = []
 
-    for port in ports:
+    for index, port in enumerate(ports, 1):
         if scan_port(target, port):
             banner = grab_banner(target, port)
+            clear_line()
             print(f"Port {port:5d} OPEN | {banner}")
             results.append({"port": port, "banner": banner})
+
+        print_progress(index, len(ports))
 
     return results
 
