@@ -7,7 +7,8 @@ identification via banner grabbing.
 """
 
 import socket
-from typing import Iterable, Tuple, List, Dict
+
+from typing import Iterable, Tuple, Callable, List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 WEB_PORTS = {
@@ -31,7 +32,6 @@ MIN_PORT = 1
 MAX_PORT = 65535
 
 MAX_INPUT_RETRIES = 3
-MAX_WORKERS = 500
 
 ### ----------- Common Utils ----------- ###
 
@@ -136,6 +136,49 @@ def print_progress(current: int, total: int) -> None:
 def clear_line() -> None:
     """Clear the current terminal line."""
     print("\r" + " " * 80 + "\r", end="")
+
+def run_tasks_concurrently(
+    func: Callable[..., Any],
+    items: Iterable,
+    max_workers: int = 100,
+    show_progress: bool = False,
+) -> List[Any]:
+    """
+    Run tasks concurrently.
+
+    Each item in `items` is passed to `func`. If an item is a tuple, it is unpacked as arguments.
+
+    Args:
+        func: Callable to run on each item.
+        items: Iterable of inputs.
+        max_workers: Maximum number of threads (default 100).
+        show_progress: If True, displays a live progress bar.
+
+    Returns:
+        List of results (excluding None), according to completion.
+    """
+    results: List[Any] = []
+    items = list(items)
+    total = len(items)
+    completed = 0
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(func, *item) if isinstance(item, tuple) else executor.submit(func, item)
+            for item in items
+        ]
+
+        for future in as_completed(futures):
+            result = future.result()
+            completed += 1
+
+            if result is not None:
+                results.append(result)
+
+            if show_progress:
+                print_progress(completed, total)
+
+    return results
 
 ### ----------- Socket Utils ----------- ###
 
@@ -352,24 +395,14 @@ def scan_ports(target: str, ports: Iterable[int], label: str) -> List[dict]:
     """
     print(f"Scanning {target} - {label}")
     
-    ports = list(ports)
-    total = len(ports)
-    results: List[dict] = []
-    completed = 0
+    tasks = [(target, port) for port in ports]
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(scan_single_port, target, port): port for port in ports}
-
-        for future in as_completed(futures):
-            result = future.result()
-            completed += 1
-
-            if result:
-                clear_line()
-                print(f"Port {result['port']:5d} OPEN | {result['banner']}")
-                results.append(result)
-
-            print_progress(completed, total)
+    results = run_tasks_concurrently(
+        func=scan_single_port,
+        items=tasks,
+        max_workers=500,
+        show_progress=True,
+    )
 
     return results
 
@@ -405,7 +438,12 @@ def main():
 
     print("\n" + "=" * 30)
     if results:
-        print(f"Scan COMPLETE. Found {len(results)} open port(s).")
+        headers = f"{'Port':>5} | Banner"
+        lines = "\n".join(f"{r['port']:5d} | {r['banner']}" for r in results)
+        print("Scan COMPLETE. Found", len(results), "open port(s):")
+        print(headers)
+        print("-" * len(headers))
+        print(lines)
     else:
         print("Scan COMPLETE. No open ports found.")
     print("=" * 30)
