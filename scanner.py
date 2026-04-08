@@ -6,6 +6,7 @@ Network Scanner
 identification via banner grabbing.
 """
 
+import os
 import socket
 
 from typing import Iterable, Tuple, Callable, List, Dict, Any
@@ -32,6 +33,8 @@ MIN_PORT = 1
 MAX_PORT = 65535
 
 MAX_INPUT_RETRIES = 3
+
+MAX_WORKERS = 200
 
 ### ----------- Common Utils ----------- ###
 
@@ -137,10 +140,42 @@ def clear_line() -> None:
     """Clear the current terminal line."""
     print("\r" + " " * 80 + "\r", end="")
 
+def get_max_workers(
+    num_tasks: int,
+    requested_workers: int | None = None,
+    threads_per_cpu: int = 5,
+) -> int:
+    """
+    Get optimal number of worker threads.
+
+    Priority:
+    1. User-defined (capped)
+    2. Adaptive based on CPU + workload
+    3. Always bounded by MAX_WORKERS
+
+    Args:
+        task_count: Total number of tasks.
+        requested_workers: User-provided worker count.
+        io_multiplier: Multiplier for I/O-bound workloads.
+
+    Returns:
+        Safe number of worker threads.
+    """
+    cpu_count = os.cpu_count() or 1
+
+    auto_thread_count = cpu_count * threads_per_cpu
+
+    workers = max(1, min(auto_thread_count, MAX_WORKERS, num_tasks))
+
+    if requested_workers is not None:
+        workers = max(1, min(requested_workers, MAX_WORKERS, num_tasks))
+
+    return workers
+
 def run_tasks_concurrently(
     func: Callable[..., Any],
     items: Iterable,
-    max_workers: int = 100,
+    max_workers: int | None = None,
     show_progress: bool = False,
 ) -> List[Any]:
     """
@@ -151,7 +186,7 @@ def run_tasks_concurrently(
     Args:
         func: Callable to run on each item.
         items: Iterable of inputs.
-        max_workers: Maximum number of threads (default 100).
+        max_workers: Maximum number of threads (default None).
         show_progress: If True, displays a live progress bar.
 
     Returns:
@@ -162,7 +197,9 @@ def run_tasks_concurrently(
     total = len(items)
     completed = 0
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    workers = get_max_workers(total, max_workers)
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = [
             executor.submit(func, *item) if isinstance(item, tuple) else executor.submit(func, item)
             for item in items
@@ -400,8 +437,7 @@ def scan_ports(target: str, ports: Iterable[int], label: str) -> List[dict]:
     results = run_tasks_concurrently(
         func=scan_single_port,
         items=tasks,
-        max_workers=500,
-        show_progress=True,
+        show_progress=True
     )
 
     return results
