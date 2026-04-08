@@ -15,7 +15,7 @@ A lightweight network scanner.
  
 ```bash
 # Clone the repository
-git clone https://github.com/rosoema/scanner.git
+git clone https://github.com/rosoema/pyscan.git
  
 # Create virtual environment
 python3 -m venv venv
