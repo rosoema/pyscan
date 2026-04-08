@@ -7,7 +7,8 @@ identification via banner grabbing.
 """
 
 import socket
-from typing import Iterable, Tuple, List
+from typing import Iterable, Tuple, List, Dict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 WEB_PORTS = {
     80,
@@ -30,6 +31,7 @@ MIN_PORT = 1
 MAX_PORT = 65535
 
 MAX_INPUT_RETRIES = 3
+MAX_WORKERS = 500
 
 ### ----------- Common Utils ----------- ###
 
@@ -171,19 +173,19 @@ def get_local_ip() -> str:
 
 ### ----------- Scan Modes ----------- ###
 
-def mode_common() -> Tuple[Iterable[int], str]:
+def port_common() -> Tuple[Iterable[int], str]:
     """Scan well-known ports (1–1023)."""
     return range(1, 1024), "Common ports (1-1023)"
 
-def mode_extended() -> Tuple[Iterable[int], str]:
+def port_extended() -> Tuple[Iterable[int], str]:
     """Scan extended range (1–10000)."""
     return range(1, 10001), "Extended ports (1-10000)"
 
-def mode_all() -> Tuple[Iterable[int], str]:
+def port_all() -> Tuple[Iterable[int], str]:
     """Scan all valid TCP ports."""
     return range(1, 65536), "All ports (1-65535)"
 
-def mode_custom_range() -> Tuple[Iterable[int], str]:
+def port_custom_range() -> Tuple[Iterable[int], str]:
     """Prompt user for a custom port range."""
     for attempt in range(MAX_INPUT_RETRIES):
         try:
@@ -207,7 +209,7 @@ def mode_custom_range() -> Tuple[Iterable[int], str]:
     print("Max retries exceeded. Using default (1-1023).")
     return range(1, 1024), "Fallback: Common ports (1-1023)"
 
-def mode_specific_ports() -> Tuple[Iterable[int], str]:
+def port_specific_ports() -> Tuple[Iterable[int], str]:
     """Prompt user for a list of specific ports."""
     for attempt in range(MAX_INPUT_RETRIES):
         try:
@@ -223,15 +225,15 @@ def mode_specific_ports() -> Tuple[Iterable[int], str]:
     print("Max retries exceeded. Using default (1-1023).")
     return range(1, 1024), "Fallback: Common ports (1-1023)"
 
-SCAN_MODES = {
-    "1": ("Common ports (1-1023)", mode_common),
-    "2": ("Extended (1-10000)", mode_extended),
-    "3": ("All ports (1-65535)", mode_all),
-    "4": ("Custom range", mode_custom_range),
-    "5": ("Specific ports", mode_specific_ports),
+PORT_SCAN_MODES = {
+    "1": ("Common ports (1-1023)", port_common),
+    "2": ("Extended (1-10000)", port_extended),
+    "3": ("All ports (1-65535)", port_all),
+    "4": ("Custom range", port_custom_range),
+    "5": ("Specific ports", port_specific_ports),
 }
 
-def get_scan_mode() -> str:
+def get_port_scan_mode() -> str:
     """
     Display scan mode options and return user choice.
 
@@ -239,13 +241,13 @@ def get_scan_mode() -> str:
         Selected mode key as a string.
     """
     print("Port range options:")
-    for key, (name, _) in SCAN_MODES.items():
+    for key, (name, _) in PORT_SCAN_MODES.items():
         print(f"  {key}. {name}")
 
     for attempt in range(MAX_INPUT_RETRIES):
         choice = input("Choose option (1-5, default: 1): ").strip() or "1"
 
-        if choice in SCAN_MODES:
+        if choice in PORT_SCAN_MODES:
             return choice
 
         print(f"Error: Invalid choice '{choice}'.")
@@ -257,7 +259,7 @@ def get_scan_mode() -> str:
 
     return "1"
 
-def resolve_scan_mode(choice: str) -> Tuple[Iterable[int], str]:
+def resolve_port_scan_mode(choice: str) -> Tuple[Iterable[int], str]:
     """
     Resolve a scan mode into a port iterable and description.
 
@@ -267,13 +269,13 @@ def resolve_scan_mode(choice: str) -> Tuple[Iterable[int], str]:
     Returns:
         Tuple of (ports iterable, human-readable name).
     """
-    name, resolver = SCAN_MODES.get(choice, SCAN_MODES["1"])
+    name, resolver = PORT_SCAN_MODES.get(choice, PORT_SCAN_MODES["1"])
     ports, description = resolver()
     return ports, description
 
 ### ----------- Port Scanning ----------- ###
 
-def scan_port(ip: str, port: int) -> bool:
+def is_port_open(ip: str, port: int) -> bool:
     """
     Check if a TCP port is open.
 
@@ -291,7 +293,7 @@ def scan_port(ip: str, port: int) -> bool:
 
     return result == 0
 
-def grab_banner(ip: str, port: int) -> str:
+def get_service_banner(ip: str, port: int) -> str:
     """
     Attempt to retrieve a service banner.
 
@@ -319,8 +321,24 @@ def grab_banner(ip: str, port: int) -> str:
         return "Timeout"
     except Exception as e:
         return f"Error: {type(e).__name__}"
+    
+def scan_single_port(target: str, port: int) -> Dict[str, str] | None:
+    """
+    Scan a single port and get banner if open.
 
-def scan_target(target: str, ports: Iterable[int], label: str) -> List[dict]:
+    Args:
+        target: Target IP or hostname.
+        port: Port to scan.
+
+    Returns:
+        dict: If open, else None.
+    """
+    if is_port_open(target, port):
+        banner = get_service_banner(target, port)
+        return {"port": port, "banner": banner}
+    return None
+
+def scan_ports(target: str, ports: Iterable[int], label: str) -> List[dict]:
     """
     Scan a target for open ports.
 
@@ -333,16 +351,25 @@ def scan_target(target: str, ports: Iterable[int], label: str) -> List[dict]:
         List of dictionaries containing open port data.
     """
     print(f"Scanning {target} - {label}")
-    results = []
+    
+    ports = list(ports)
+    total = len(ports)
+    results: List[dict] = []
+    completed = 0
 
-    for index, port in enumerate(ports, 1):
-        if scan_port(target, port):
-            banner = grab_banner(target, port)
-            clear_line()
-            print(f"Port {port:5d} OPEN | {banner}")
-            results.append({"port": port, "banner": banner})
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(scan_single_port, target, port): port for port in ports}
 
-        print_progress(index, len(ports))
+        for future in as_completed(futures):
+            result = future.result()
+            completed += 1
+
+            if result:
+                clear_line()
+                print(f"Port {result['port']:5d} OPEN | {result['banner']}")
+                results.append(result)
+
+            print_progress(completed, total)
 
     return results
 
@@ -350,9 +377,9 @@ def scan_target(target: str, ports: Iterable[int], label: str) -> List[dict]:
 
 def main():
     """Entry point"""
-    print("=" * 50)
+    print("=" * 30)
     print("Network Scanner")
-    print("=" * 50)
+    print("=" * 30)
 
     my_ip = get_local_ip()
     print(f"Your IP: {my_ip}")
@@ -371,17 +398,17 @@ def main():
             else:
                 print("Max retries exceeded. Using default IP.")
 
-    choice = get_scan_mode()
-    ports, label = resolve_scan_mode(choice)
+    choice = get_port_scan_mode()
+    ports, label = resolve_port_scan_mode(choice)
 
-    results = scan_target(target, ports, label)
+    results = scan_ports(target, ports, label)
 
-    print("\n" + "=" * 50)
+    print("\n" + "=" * 30)
     if results:
         print(f"Scan COMPLETE. Found {len(results)} open port(s).")
     else:
         print("Scan COMPLETE. No open ports found.")
-    print("=" * 50)
+    print("=" * 30)
 
 if __name__ == "__main__":
     main()
