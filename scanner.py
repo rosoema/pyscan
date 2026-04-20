@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 
 """
-Network Scanner
-- Scans target host for open TCP and UDP ports and attempts basic service
-identification via banner grabbing.
+PyScan - A lightweight Python network scanner
+
+Features:
+- Host discovery (ARP, ICMP, TCP SYN)
+- TCP / UDP scanning
+- Service detection
+- OS fingerprinting (basic)
 """
 
 import os
 import socket
 import sys
+import subprocess
+import re
 
 from typing import Iterable, Tuple, Callable, List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -32,12 +38,51 @@ WEB_PORTS = {
     7070,
 }
 
+COMMON_UDP_PORTS = {
+    53,
+    67,
+    68,
+    69,
+    123,
+    161,
+    500,
+    514,
+    1194,
+    5060,
+    5061,
+    1812,
+    1813
+}
+
+SERVICE_PROBES = {
+    21: b"", 
+    22: b"",
+    23: b"", 
+    25: b"EHLO pyscan\r\n", 
+    80: b"GET / HTTP/1.0\r\n\r\n",
+    110: b"",  
+    143: b"",  
+    443: b"GET / HTTP/1.0\r\n\r\n",  
+    3306: b"",  
+    5432: b"", 
+    6379: b"PING\r\n",
+    8080: b"GET / HTTP/1.0\r\n\r\n", 
+}
+
+COMMON_SERVICES = {
+    20: "ftp-data", 21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp",
+    53: "dns", 80: "http", 110: "pop3", 143: "imap", 443: "https",
+    445: "microsoft-ds", 3306: "mysql", 3389: "rdp", 5432: "postgresql",
+    5900: "vnc", 6379: "redis", 8080: "http-proxy", 8443: "https-alt",
+    27017: "mongodb", 5000: "upnp", 8000: "http-alt",
+}
+
 MIN_PORT = 1
 MAX_PORT = 65535
 
 MAX_INPUT_RETRIES = 3
 
-MAX_WORKERS = 200
+MAX_WORKERS = 100
 
 ### ----------- Common Utils ----------- ###
 
@@ -136,7 +181,7 @@ def print_progress(current: int, total: int) -> None:
     fraction = current / total
     filled_length = int(progress_bar_length * fraction)
 
-    bar = "#" * filled_length + "-" * (progress_bar_length - filled_length)
+    bar = "█" * filled_length + "░" * (progress_bar_length - filled_length)
     percent = int(fraction * 100)
 
     print(f"\r[{bar}] {percent:3d}% ({current}/{total})", end="", flush=True)
@@ -159,7 +204,7 @@ def get_max_workers(
     3. Always bounded by MAX_WORKERS
 
     Args:
-        task_count: Total number of tasks.
+        num_tasks: Total number of tasks.
         requested_workers: User-provided worker count.
         threads_per_cpu: How many threads each core should handle.
 
@@ -167,9 +212,7 @@ def get_max_workers(
         Safe number of workers.
     """
     cpu_count = os.cpu_count() or 1
-
     auto_thread_count = cpu_count * threads_per_cpu
-
     workers = max(1, min(auto_thread_count, MAX_WORKERS, num_tasks))
 
     if requested_workers is not None:
@@ -229,9 +272,21 @@ def run_tasks_concurrently(
 
     return results
 
+def get_network_prefix(ip: str) -> str:
+    """
+    Extract network prefix from IP address.
+    
+    Args:
+        ip: IP address string.
+    
+    Returns:
+        Network prefix (e.g., "192.168.1" from "192.168.1.10").
+    """
+    return ".".join(ip.split(".")[:3])
+
 ### ----------- Socket Utils ----------- ###
 
-def create_socket(sock_type=socket.SOCK_STREAM, timeout: float = 1.0) -> socket.socket:
+def create_socket(sock_type=socket.SOCK_STREAM, timeout: int = 1) -> socket.socket:
     """
     Create and configure a socket.
 
@@ -247,21 +302,26 @@ def create_socket(sock_type=socket.SOCK_STREAM, timeout: float = 1.0) -> socket.
 
     return sock
 
-def get_local_ip() -> str:
+def get_local_info() -> Tuple[str, str]:
     """
-    Determine the local IP address of the machine.
+    Determine the local IP address and hostname of the machine.
 
     Returns:
-        Local IP address as a string, or 127.0.0.1 if fail.
+        Tuple of (hostname, local IP address), or ("N/A", "127.0.0.1") if fail.
     """
     try:
         sock = create_socket(socket.SOCK_DGRAM)
         sock.connect(("8.8.8.8", 80))
+
+        hostname = socket.gethostname()
         ip = sock.getsockname()[0]
+
         sock.close()
-        return ip
-    except Exception:
-        return "127.0.0.1"
+
+        return hostname, ip
+    except Exception as e:
+        print(f"Error: {e}.")
+        return "N/A", "127.0.0.1"
 
 ### ----------- Port Mode Helpers ----------- ###
 
@@ -270,8 +330,7 @@ def port_common(protocol: str) -> Tuple[Iterable[int], str]:
     if protocol == "tcp":
         return range(1, 1024), "Common TCP ports (1-1023)"
     elif protocol == "udp":
-        udp_ports = [53, 67, 68, 123, 161, 500, 514]
-        return udp_ports, "Common UDP ports"
+        return COMMON_UDP_PORTS, "Common UDP ports"
     else:
         raise ValueError(f"Unsupported protocol: {protocol}")
 
@@ -301,7 +360,6 @@ def port_custom_range(protocol: str) -> Tuple[Iterable[int], str]:
             return range(start, end + 1), f"Custom {proto_upper} range ({start}-{end})."
         except ValueError as e:
             print(f"Error: {e}.")
-
             if attempt < MAX_INPUT_RETRIES - 1:
                 print("Please try again.")
     
@@ -323,7 +381,6 @@ def port_specific_ports(protocol: str) -> Tuple[Iterable[int], str]:
             return ports, f"Specific {proto_upper} ports: {ports}."
         except Exception as e:
             print(f"Error: {e}.")
-
             if attempt < MAX_INPUT_RETRIES - 1:
                 print("Please try again.")
     
@@ -333,55 +390,6 @@ def port_specific_ports(protocol: str) -> Tuple[Iterable[int], str]:
     else:
         print("Max retries exceeded. Using default (common UDP ports).")
         return port_common("udp")
-
-# Protocol-specific wrappers
-def port_tcp_common() -> Tuple[Iterable[int], str]:
-    return port_common("tcp")
-
-def port_tcp_extended() -> Tuple[Iterable[int], str]:
-    return port_extended("tcp")
-
-def port_tcp_all() -> Tuple[Iterable[int], str]:
-    return port_all("tcp")
-
-def port_tcp_custom_range() -> Tuple[Iterable[int], str]:
-    return port_custom_range("tcp")
-
-def port_tcp_specific_ports() -> Tuple[Iterable[int], str]:
-    return port_specific_ports("tcp")
-
-def port_udp_common() -> Tuple[Iterable[int], str]:
-    return port_common("udp")
-
-def port_udp_extended() -> Tuple[Iterable[int], str]:
-    return port_extended("udp")
-
-def port_udp_all() -> Tuple[Iterable[int], str]:
-    return port_all("udp")
-
-def port_udp_custom_range() -> Tuple[Iterable[int], str]:
-    return port_custom_range("udp")
-
-def port_udp_specific_ports() -> Tuple[Iterable[int], str]:
-    return port_specific_ports("udp")
-
-SCAN_PROTOCOLS = {
-    "tcp": "TCP",
-    "udp": "UDP",
-}
-
-PORT_SCAN_MODES = {
-    "1": ("Common TCP ports (1-1023)", port_tcp_common),
-    "2": ("Extended TCP (1-10000)", port_tcp_extended),
-    "3": ("All TCP ports (1-65535)", port_tcp_all),
-    "4": ("Custom TCP range", port_tcp_custom_range),
-    "5": ("Specific TCP ports", port_tcp_specific_ports),
-    "6": ("Common UDP ports", port_udp_common),
-    "7": ("Extended UDP (1-10000)", port_udp_extended),
-    "8": ("All UDP ports (1-65535)", port_udp_all),
-    "9": ("Custom UDP range", port_udp_custom_range),
-    "10": ("Specific UDP ports", port_udp_specific_ports),
-}
 
 ### ----------- User Input & Menu Helpers ----------- ###
 
@@ -393,15 +401,16 @@ def get_scan_type() -> str:
         Selected scan type key as a string.
     """
     SCAN_TYPES = {
-        "1": ("Port Scan", None),
+        "1": ("Host Discovery", None),
+        "2": ("Port Scan", None),
     }
     
-    print("Scan type options:")
+    print("\nScan type options:")
     for key, (name, _) in SCAN_TYPES.items():
         print(f"  {key}. {name}")
     
     for attempt in range(MAX_INPUT_RETRIES):
-        choice = input("Choose scan type (1, default: 1): ").strip() or "1"
+        choice = input("Choose scan type (1-2, default: 1): ").strip() or "1"
         
         if choice in SCAN_TYPES:
             return choice
@@ -414,6 +423,33 @@ def get_scan_type() -> str:
     
     return "1"
 
+def get_target_ip(default_ip: str) -> str:
+    """
+    Prompt user for target IP address with validation and retry logic.
+    
+    Args:
+        default_ip: Default IP to use if user presses Enter.
+    
+    Returns:
+        Validated IP address string.
+    """
+    for attempt in range(MAX_INPUT_RETRIES):
+        try:
+            target = input(f"\nEnter IP to scan (default: {default_ip}): ").strip() or default_ip
+            return validate_ip(target)
+        except ValueError as e:
+            print(f"Error: {e}.")
+            if attempt < MAX_INPUT_RETRIES - 1:
+                print("Please try again.")
+            else:
+                print("Max retries exceeded. Using default IP.")
+                return default_ip
+        except KeyboardInterrupt:
+            print("\nInput interrupted. Exiting.")
+            sys.exit(0)
+    
+    return default_ip
+
 def get_protocol() -> str:
     """
     Display protocol options and return user choice.
@@ -421,17 +457,20 @@ def get_protocol() -> str:
     Returns:
         Selected protocol as a string ("tcp" or "udp").
     """
-    print("Protocol options:")
-    print("  1. TCP")
-    print("  2. UDP")
+    PROTOCOLS = {
+        "1": ("tcp", None),
+        "2": ("udp", None),
+    }
+    
+    print("\nProtocol options:")
+    for key, (name, _) in PROTOCOLS.items():
+        print(f"  {key}. {name.upper()}")
     
     for attempt in range(MAX_INPUT_RETRIES):
         choice = input("Choose protocol (1-2, default: 1): ").strip() or "1"
         
-        if choice == "1":
-            return "tcp"
-        elif choice == "2":
-            return "udp"
+        if choice in PROTOCOLS:
+            return PROTOCOLS[choice][0]
         
         print(f"Error: Invalid choice '{choice}'.")
         if attempt < MAX_INPUT_RETRIES - 1:
@@ -460,7 +499,7 @@ def get_port_mode(protocol: str) -> str:
     }
     
     proto_upper = protocol.upper()
-    print(f"{proto_upper} port range options:")
+    print(f"\n{proto_upper} port range options:")
     for key, (name, _) in PORT_MODES.items():
         print(f"  {key}. {name}")
     
@@ -501,45 +540,315 @@ def resolve_port_mode(protocol: str, mode_choice: str) -> Tuple[Iterable[int], s
     ports, description = resolver(protocol)
     return ports, description
 
-def get_port_scan_mode() -> str:
-    """
-    Display scan mode options and return user choice.
+### ----------- Enhanced Host Discovery ----------- ###
 
+def tcp_ping(ip: str, ports: List[int] = [80, 443, 22]) -> bool:
+    """
+    Perform TCP ping by attempting SYN connection to common ports.
+    Useful if ICMP is blocked.
+    
+    Args:
+        ip: Target IP address.
+        ports: List of ports to try (default: web and SSH).
+    
     Returns:
-        Selected mode key as a string.
+        True if any port responds, False otherwise.
     """
-    print("Port range options:")
-    for key, (name, _) in PORT_SCAN_MODES.items():
-        print(f"  {key}. {name}")
+    for port in ports:
+        try:
+            sock = create_socket(timeout=1)
+            result = sock.connect_ex((ip, port))
+            sock.close()
+            if result == 0 or result == 111:  # 0=open, 111=connection refused (but host is up)
+                return True
+        except:
+            pass
+    return False
 
+def is_host_alive(ip: str, timeout: int = 3, use_tcp_fallback: bool = True) -> Tuple[bool, str]:
+    """
+    Check if a host is alive using ICMP ping, with optional TCP fallback.
+    
+    Args:
+        ip: Target IP address.
+        timeout: Ping timeout in seconds.
+        use_tcp_fallback: If True, try TCP ping if ICMP fails.
+    
+    Returns:
+        Tuple of (is_alive, detection_method).
+    """
+    try:
+        response = subprocess.run(
+            ["ping", "-c", "1", "-W", str(timeout), ip],
+            capture_output=True,
+            text=True
+        )
+        
+        if response.returncode == 0:
+            return True, "ICMP"
+    except (subprocess.TimeoutExpired, Exception):
+        pass
+    
+    # Try TCP ping as fallback if ICMP failed
+    if use_tcp_fallback:
+        if tcp_ping(ip):
+            return True, "TCP"
+    
+    return False, "down"
+
+def resolve_hostname(ip: str, provided_hostname: str = None, timeout: int = 1) -> str:
+    """
+    Enhanced hostname resolution using multiple methods.
+    
+    Args:
+        ip: IP address to resolve.
+        timeout: Timeout for DNS lookup.
+    
+    Returns:
+        Hostname or "N/A" if resolution fails.
+    """
+    if provided_hostname and provided_hostname != "?":
+        return provided_hostname
+
+    try:
+        socket.setdefaulttimeout(timeout)
+        return socket.gethostbyaddr(ip)[0]
+    except:
+        pass
+
+    try:
+        hostname = socket.getfqdn(ip)
+        if hostname != ip:
+            return hostname
+    except:
+        pass
+
+    return "N/A"
+
+def get_arp_table() -> List[Dict[str, str]]:
+    """
+    Perform ARP scan and parse results into structured data.
+    More reliable than ICMP for local network discovery.
+    
+    Returns:
+        List of dictionaries with 'ip', 'mac', and 'hostname' keys.
+    """
+    try:
+        result = subprocess.run(
+            ["arp", "-a"],
+            capture_output=True,
+            text=True
+        )
+
+        hosts = []
+
+        arp_regex = re.compile(
+            r"(\S+)\s+\((\d+\.\d+\.\d+\.\d+)\)\s+at\s+(?:\(incomplete\)|([0-9a-fA-F:]+))\s+on\s+(\S+)\s+([^[]+?)\s*\[(\w+)\]"
+        )
+        
+        for line in result.stdout.splitlines():
+            match = arp_regex.search(line)
+            if not match:
+                continue
+            
+            raw_hostname = match.group(1)
+            ip = match.group(2)
+            mac = match.group(3)
+            interface = match.group(4) 
+            flags = match.group(5) 
+            link_type = match.group(6)
+            
+            if ip.endswith(".255") or ip.startswith("224."):
+                continue
+
+            if mac is None and (raw_hostname is None or raw_hostname == "?"):
+                continue
+            
+            raw_hostname = raw_hostname.strip() if raw_hostname and raw_hostname != "?" else None
+            hostname = resolve_hostname(ip, provided_hostname=raw_hostname)
+            
+            state = "offline" if mac is None else "online"
+            
+            hosts.append({
+                "ip": ip,
+                "mac": mac if mac else "N/A",
+                "hostname": hostname,
+                "interface": interface,
+                "flags": flags.strip() if flags else "",
+                "link_type": link_type if link_type else "",
+                "state": state,
+                "method": "ARP"
+            })
+        return hosts
+
+    except Exception as e:
+        print(f"ARP scan error: {e}")
+        return []
+
+def perform_ping_sweep(network_prefix: str, use_tcp_fallback: bool = True) -> List[Dict[str, str]]:
+    """
+    Perform ping sweep on a network with TCP fallback for firewall evasion.
+    
+    Args:
+        network_prefix: Network prefix (e.g., "192.168.1").
+        use_tcp_fallback: Whether to use TCP ping if ICMP fails.
+    
+    Returns:
+        List of alive hosts with their details.
+    """
+    def check_host(host_num: int) -> Dict[str, str] | None:
+        ip = f"{network_prefix}.{host_num}"
+        is_alive, method = is_host_alive(ip, use_tcp_fallback=use_tcp_fallback)
+        
+        if is_alive:
+            hostname = resolve_hostname(ip)
+            mac = "N/A"
+            
+            return {
+                "ip": ip,
+                "hostname": hostname,
+                "mac": mac,
+                "method": method
+            }
+        return None
+    
+    print(f"Scanning network {network_prefix}.0/24...")
+    
+    tasks = range(1, 255)
+    results = run_tasks_concurrently(
+        func=check_host,
+        items=tasks,
+        show_progress=True
+    )
+    
+    return results
+
+def get_discovery_mode() -> str:
+    """
+    Display host discovery mode options and return user choice.
+    
+    Returns:
+        Selected mode: 'arp', 'ping', or 'both'.
+    """
+    DISCOVERY_MODES = {
+        "1": ("arp", "ARP scan (fastest, local network only)"),
+        "2": ("ping", "Ping sweep (ICMP + TCP fallback)"),
+        "3": ("both", "Both (most comprehensive)")
+    }
+
+    print("\nHost discovery method:")
+    for key, (_, title) in DISCOVERY_MODES.items():
+        print(f"  {key}. {title}")
+    
     for attempt in range(MAX_INPUT_RETRIES):
-        choice = input("Choose option (1-10, default: 1): ").strip() or "1"
-
-        if choice in PORT_SCAN_MODES:
-            return choice
-
+        choice = input("Choose method (1-3, default: 3): ").strip() or "3"
+        
+        if choice in DISCOVERY_MODES:
+            return DISCOVERY_MODES[choice][0]
+        
         print(f"Error: Invalid choice '{choice}'.")
-
         if attempt < MAX_INPUT_RETRIES - 1:
             print("Please try again.")
         else:
-            print("Max retries exceeded. Using default (1).")
+            print("Max retries exceeded. Using default (Both).")
+    
+    return "both"
 
-    return "1"
-
-def resolve_port_scan_mode(choice: str) -> Tuple[Iterable[int], str]:
+def perform_host_discovery(local_ip: str, mode: str = "both") -> List[Dict[str, str]]:
     """
-    Resolve a scan mode into a port iterable and description.
+    Perform host discovery using selected methods.
 
     Args:
-        choice: Mode key selected by the user.
+        local_ip: Local IP address to determine network.
+        mode: Discovery mode ('arp', 'ping', or 'both').
 
     Returns:
-        Tuple of (ports iterable, human-readable name).
+        List of discovered hosts with their details.
     """
-    name, resolver = PORT_SCAN_MODES.get(choice, PORT_SCAN_MODES["1"])
-    ports, description = resolver()
-    return ports, description
+    print(f"\nPerforming host discovery...")
+    
+    all_hosts = {}
+    
+    if mode in ["ping", "both"]:
+        network_prefix = get_network_prefix(local_ip)
+        step_num = 2 if mode == "both" else 1
+        print(f"\n[{step_num}/2] Running ping sweep on {network_prefix}.0/24...")
+        ping_hosts = perform_ping_sweep(network_prefix, use_tcp_fallback=True)
+        
+        for host in ping_hosts:
+            all_hosts[host["ip"]] = host
+        
+        print(f"\nFound {len(ping_hosts)} hosts via ping")
+    
+    if mode in ["arp", "both"]:
+        print("\n[1/2] Running ARP scan...")
+        arp_hosts = get_arp_table()
+        
+        for host in arp_hosts:
+            ip = host["ip"]
+            
+            if ip in all_hosts:
+                existing = all_hosts[ip]
+                
+                if host.get("mac") and host["mac"] != "N/A" and existing.get("mac") in ["N/A", "N/A", None]:
+                    existing["mac"] = host["mac"]
+                
+                if host.get("hostname") and host["hostname"] != "N/A" and existing.get("hostname") in ["N/A", None]:
+                    existing["hostname"] = host["hostname"]
+                
+                existing["interface"] = host.get("interface", "N/A")
+                existing["flags"] = host.get("flags", "N/A")
+                existing["link_type"] = host.get("link_type", "N/A")
+                existing["state"] = host.get("state", "N/A")
+                
+                ping_method = existing.get("method", "")
+                existing["method"] = f"{ping_method} + ARP"
+            else:
+                all_hosts[ip] = host
+        
+        print(f"Found {len(arp_hosts)} hosts via ARP")
+    
+    return list(all_hosts.values())
+
+def display_discovery_results(hosts: List[Dict[str, str]]) -> None:
+    """
+    Display host discovery results in a formatted table.
+    
+    Args:
+        hosts: List of discovered host dictionaries.
+    """
+    print("\n" + "=" * 30)
+    print("HOST DISCOVERY RESULTS".center(30))
+    print("=" * 30)
+
+    if not hosts:
+        print("No hosts discovered.")
+        print("=" * 30)
+        return
+
+    print(f"{'IP':<15} | {'Hostname':<25} | {'MAC':<20} | {'Method':<12} | "
+          f"{'Interface':<10} | {'Flags':<17} | {'Link Type':<11} | {'State':<8}")
+    
+    print("-" * 30)
+
+    hosts_sorted = sorted(hosts, key=lambda x: tuple(map(int, x["ip"].split("."))))
+
+    for host in hosts_sorted:
+        ip = host.get("ip", "N/A")
+        hostname = host.get("hostname", "N/A")[:25]
+        mac = host.get("mac", "N/A")
+        method = host.get("method", "N/A")
+        interface = host.get("interface", "N/A")
+        flags = host.get("flags", "N/A")
+        link_type = host.get("link_type", "N/A")
+        state = host.get("state", "N/A")
+
+        print(f"{ip:<15} | {hostname:<25} | {mac:<20} | {method:<12} | "
+              f"{interface:<10} | {flags:<17} | {link_type:<11} | {state:<8}")
+
+    print("-" * 30)
+    print(f"Total hosts discovered: {len(hosts)}")
+    print("=" * 30)
 
 ### ----------- Port Scanning ----------- ###
 
@@ -554,7 +863,7 @@ def is_tcp_port_open(ip: str, port: int) -> bool:
     Returns:
         True if open, otherwise False.
     """
-    sock = create_socket()
+    sock = create_socket(timeout=1)
     result = sock.connect_ex((ip, port))
 
     sock.close()
@@ -563,7 +872,7 @@ def is_tcp_port_open(ip: str, port: int) -> bool:
 
 def get_tcp_service_banner(ip: str, port: int) -> str:
     """
-    Attempt to retrieve a service banner.
+    Service banner grabbing with protocol-specific probes.
 
     Args:
         ip: Target IP address.
@@ -576,23 +885,40 @@ def get_tcp_service_banner(ip: str, port: int) -> str:
         sock = create_socket(timeout=2)
         sock.connect((ip, port))
 
+        probe = SERVICE_PROBES.get(port, b"")
+        if probe:
+            sock.send(probe)
+        
         banner = sock.recv(1024).decode("utf-8", errors="ignore").strip()
-
+        
         if not banner and port in WEB_PORTS:
-            sock.send(b"GET / HTTP/1.0\r\n\r\n")
-            banner = sock.recv(1024).decode("utf-8", errors="ignore").strip()
+            try:
+                sock.send(b"GET / HTTP/1.0\r\nHost: " + ip.encode() + b"\r\n\r\n")
+                banner = sock.recv(1024).decode("utf-8", errors="ignore").strip()
+            except:
+                pass
 
         sock.close()
 
-        return banner.split("\n")[0][:80] if banner else "Unknown"
+        if banner:
+            lines = banner.split("\n")
+            for line in lines:
+                line = line.strip()
+                if line:
+                    return line[:80]
+        
+        if port in COMMON_SERVICES:
+            return f"{COMMON_SERVICES[port]} (no banner)"
+        
+        return "Open (no banner)"
     except socket.timeout:
         return "Timeout"
     except Exception as e:
         return f"Error: {type(e).__name__}"
-    
+
 def is_udp_port_open(ip: str, port: int) -> bool:
     """
-    Check if a UDP port is open by sending a probe and waiting for a response.
+    Enhanced UDP port detection using protocol-specific probes.
     
     Args:
         ip: Target IP address.
@@ -602,8 +928,17 @@ def is_udp_port_open(ip: str, port: int) -> bool:
         True if a response is received (indicating open), otherwise False.
     """
     try:
-        sock = create_socket(socket.SOCK_DGRAM, timeout=1.0)
-        sock.sendto(b"", (ip, port))
+        sock = create_socket(socket.SOCK_DGRAM, timeout=1)
+        
+        probes = {
+            53: b"\x00\x00\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07version\x04bind\x00\x00\x10\x00\x03",
+            123: b"\x1b" + b"\x00" * 47, 
+            161: b"\x30\x26\x02\x01\x00\x04\x06\x70\x75\x62\x6c\x69\x63", 
+        }
+        
+        probe = probes.get(port, b"\x00\x01\x00\x00")
+        sock.sendto(probe, (ip, port))
+        
         data, _ = sock.recvfrom(1024)
         sock.close()
         return True
@@ -614,7 +949,7 @@ def is_udp_port_open(ip: str, port: int) -> bool:
 
 def get_udp_service_banner(ip: str, port: int) -> str:
     """
-    Attempt to retrieve a UDP service banner (basic probe).
+    Attempt to retrieve a UDP service banner with protocol-specific probes.
     
     Args:
         ip: Target IP address.
@@ -624,19 +959,34 @@ def get_udp_service_banner(ip: str, port: int) -> str:
         Banner string or status message.
     """
     try:
-        sock = create_socket(socket.SOCK_DGRAM, timeout=2.0)
-        probe = b"\x00\x01\x00\x00\x00\x00\x00\x00"
+        sock = create_socket(socket.SOCK_DGRAM, timeout=2)
+        
+        probes = {
+            53: b"\x00\x00\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07version\x04bind\x00\x00\x10\x00\x03",
+            123: b"\x1b" + b"\x00" * 47,
+            161: b"\x30\x26\x02\x01\x00\x04\x06\x70\x75\x62\x6c\x69\x63",
+        }
+        
+        probe = probes.get(port, b"\x00\x01\x00\x00\x00\x00\x00\x00")
         sock.sendto(probe, (ip, port))
+        
         data, _ = sock.recvfrom(1024)
         banner = data.decode("utf-8", errors="ignore").strip()
         sock.close()
-        return banner[:80] if banner else "Unknown"
+        
+        if banner:
+            return banner[:80]
+        
+        if port in COMMON_SERVICES:
+            return f"{COMMON_SERVICES[port]} (open)"
+        
+        return "Open (no banner)"
     except socket.timeout:
         return "Timeout"
     except Exception as e:
         return f"Error: {type(e).__name__}"
 
-def scan_single_port(target: str, port: int, protocol: str) -> Dict[str, str] | None:
+def scan_single_port(target: str, port: int, protocol: str) -> Dict[str, Any] | None:
     """
     Scan a single port and get banner if open/responsive.
 
@@ -646,16 +996,26 @@ def scan_single_port(target: str, port: int, protocol: str) -> Dict[str, str] | 
         protocol: "tcp" or "udp".
 
     Returns:
-        dict: If open/responsive, else None.
+        dict: If open/responsive with port, banner, and service info, else None.
     """
     if protocol == "tcp":
         if is_tcp_port_open(target, port):
             banner = get_tcp_service_banner(target, port)
-            return {"port": port, "banner": banner}
+            service = COMMON_SERVICES.get(port, "N/A")
+            return {
+                "port": port,
+                "banner": banner,
+                "service": service
+            }
     elif protocol == "udp":
         if is_udp_port_open(target, port):
             banner = get_udp_service_banner(target, port)
-            return {"port": port, "banner": banner}
+            service = COMMON_SERVICES.get(port, "N/A")
+            return {
+                "port": port,
+                "banner": banner,
+                "service": service
+            }
     else:
         raise ValueError(f"Unsupported protocol: {protocol}")
     return None
@@ -673,7 +1033,7 @@ def scan_ports(target: str, ports: Iterable[int], label: str, protocol: str = "t
     Returns:
         List of dictionaries containing open port data.
     """
-    print(f"Scanning {target} - {label} ({protocol.upper()})")
+    print(f"\nScanning {target} - {label} ({protocol.upper()})")
     
     tasks = [(target, port, protocol) for port in ports]
     
@@ -685,58 +1045,72 @@ def scan_ports(target: str, ports: Iterable[int], label: str, protocol: str = "t
     
     return results
 
+def display_port_scan_results(results: List[dict], protocol: str) -> None:
+    """
+    Display port scan results in a formatted table with service information.
+    
+    Args:
+        results: List of scan result dictionaries.
+        protocol: Protocol used ("tcp" or "udp").
+    """
+    if not results:
+        print(f"\nScan COMPLETE. No open {protocol.upper()} ports found.\n")
+        return
+
+    print("\n" + "=" * 100)
+    if results:
+        results_sorted = sorted(results, key=lambda x: x['port'])
+        
+        headers = f"{'Port':>5} | {'Service':<15} | Banner"
+        print(f"Scan COMPLETE. Found {len(results)} open {protocol.upper()} port(s):")
+        print(headers)
+        print("-" * 100)
+        
+        for r in results_sorted:
+            port = r['port']
+            service = r.get('service', 'N/A')[:15]
+            banner = r.get('banner', 'N/A')
+            print(f"{port:5d} | {service:<15} | {banner}")
+    else:
+        print(f"Scan COMPLETE. No open {protocol.upper()} ports found.")
+    print("=" * 100)
+
 ### ---------- Main ---------- ###
 
 def main():
     """Entry point"""
     try:
-        print("=" * 30)
-        print("Network Scanner")
-        print("=" * 30)
+        print("\n" + "=" * 30)
+        print("Welcome to PyScan!".center(30))
+        print("=" * 30 + "\n")
 
-        my_ip = get_local_ip()
-        print(f"Your IP: {my_ip}")
+        hostname, local_ip = get_local_info()
 
-        target = my_ip
+        print(f"Hostname: {hostname}")
+        print(f"Your IP: {local_ip}")
 
-        for attempt in range(MAX_INPUT_RETRIES):
-            try:
-                target = validate_ip(input(f"Enter IP to scan (default: {my_ip}): ").strip() or my_ip)
-                break
-            except ValueError as e:
-                print(f"Error: {e}.")
-                if attempt < MAX_INPUT_RETRIES - 1:
-                    print("Please try again.")
-                else:
-                    print("Max retries exceeded. Using default IP.")
-            except KeyboardInterrupt:
-                print("\nInput interrupted. Exiting.")
-                return
+        target = get_target_ip(local_ip)
 
         scan_type = get_scan_type()
         
         if scan_type == "1":
+            # Host discovery
+            discovery_mode = get_discovery_mode()
+            hosts = perform_host_discovery(local_ip, discovery_mode)
+            display_discovery_results(hosts)
+
+        elif scan_type == "2":
+            # Port scanning
             protocol = get_protocol()
             mode_choice = get_port_mode(protocol)
             ports, label = resolve_port_mode(protocol, mode_choice)
             
             results = scan_ports(target, ports, label, protocol)
-            
-            print("\n" + "=" * 30)
-            if results:
-                headers = f"{'Port':>5} | Banner"
-                lines = "\n".join(f"{r['port']:5d} | {r['banner']}" for r in results)
-                print(f"Scan COMPLETE. Found {len(results)} open {protocol.upper()} port(s):")
-                print(headers)
-                print("-" * len(headers))
-                print(lines)
-            else:
-                print(f"Scan COMPLETE. No open {protocol.upper()} ports found.")
-            print("=" * 30)
+            display_port_scan_results(results, protocol)
         else:
-            print("Unsupported scan type.")
+            print("Unsupported scan type.")    
     except KeyboardInterrupt:
-        print("\nScan interrupted by user. Exiting gracefully.")
+        print("\nScan interrupted by user. Exiting.")
         sys.exit(0)
     except Exception as e:
         print(f"\nUnexpected error: {e}. Exiting.")
