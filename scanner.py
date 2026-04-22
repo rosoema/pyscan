@@ -3,11 +3,12 @@
 """
 PyScan - A lightweight Python network scanner
 
+> ⚠️ Active development
+
 Features:
-- Host discovery (ARP, ICMP, TCP SYN)
+- Host discovery (ARP, ICMP)
 - TCP / UDP scanning
 - Service detection
-- OS fingerprinting (basic)
 """
 
 import os
@@ -15,8 +16,9 @@ import socket
 import sys
 import subprocess
 import re
+import ipaddress
 
-from typing import Iterable, Tuple, Callable, List, Dict, Any
+from typing import Iterable, Tuple, Callable, List, Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 ### ----------- Constants ----------- ###
@@ -77,12 +79,14 @@ COMMON_SERVICES = {
     27017: "mongodb", 5000: "upnp", 8000: "http-alt",
 }
 
-MIN_PORT = 1
-MAX_PORT = 65535
+MIN_PORT, MAX_PORT = 1, 65535
 
 MAX_INPUT_RETRIES = 3
 
 MAX_WORKERS = 100
+
+RECV_BUFFER_SIZE = 4096
+NETWORK_HOST_RANGE = 255
 
 ### ----------- Common Utils ----------- ###
 
@@ -115,7 +119,7 @@ def validate_int(value: str, min_val: int = None, max_val: int = None, field_nam
     
     return num
 
-def validate_ip(ip: str) -> str:
+def validate_ip(ip: str, allow_ipv6: bool = True) -> str:
     """
     Validate IP address format.
     
@@ -132,7 +136,16 @@ def validate_ip(ip: str) -> str:
         socket.inet_aton(ip)
         return ip
     except socket.error:
-        raise ValueError(f"Invalid IP address format: '{ip}'.")
+        pass
+    
+    if allow_ipv6:
+        try:
+            socket.inet_pton(socket.AF_INET6, ip)
+            return ip
+        except socket.error:
+            pass
+
+    raise ValueError(f"Invalid IP address format: '{ip}'.")
 
 def parse_port_list(ports_str: str) -> List[int]:
     """
@@ -286,7 +299,7 @@ def get_network_prefix(ip: str) -> str:
 
 ### ----------- Socket Utils ----------- ###
 
-def create_socket(sock_type=socket.SOCK_STREAM, timeout: int = 1) -> socket.socket:
+def create_socket(ip: str = None, sock_type=socket.SOCK_STREAM, timeout: int = 1) -> socket.socket:
     """
     Create and configure a socket.
 
@@ -297,7 +310,8 @@ def create_socket(sock_type=socket.SOCK_STREAM, timeout: int = 1) -> socket.sock
     Returns:
         Configured socket instance.
     """
-    sock = socket.socket(socket.AF_INET, sock_type)
+    family = socket.AF_INET6 if ip and ":" in ip else socket.AF_INET
+    sock = socket.socket(family, sock_type)
     sock.settimeout(timeout)
 
     return sock
@@ -310,7 +324,7 @@ def get_local_info() -> Tuple[str, str]:
         Tuple of (hostname, local IP address), or ("N/A", "127.0.0.1") if fail.
     """
     try:
-        sock = create_socket(socket.SOCK_DGRAM)
+        sock = create_socket(sock_type=socket.SOCK_DGRAM)
         sock.connect(("8.8.8.8", 80))
 
         hostname = socket.gethostname()
@@ -542,7 +556,7 @@ def resolve_port_mode(protocol: str, mode_choice: str) -> Tuple[Iterable[int], s
 
 ### ----------- Enhanced Host Discovery ----------- ###
 
-def tcp_ping(ip: str, ports: List[int] = [80, 443, 22]) -> bool:
+def tcp_ping(ip: str, ports: List[int] | None = None) -> bool:
     """
     Perform TCP ping by attempting SYN connection to common ports.
     Useful if ICMP is blocked.
@@ -554,9 +568,12 @@ def tcp_ping(ip: str, ports: List[int] = [80, 443, 22]) -> bool:
     Returns:
         True if any port responds, False otherwise.
     """
+    if ports is None:
+        ports = [80, 443, 22]
+
     for port in ports:
         try:
-            sock = create_socket(timeout=1)
+            sock = create_socket(ip=ip)
             result = sock.connect_ex((ip, port))
             sock.close()
             if result == 0 or result == 111:  # 0=open, 111=connection refused (but host is up)
@@ -565,7 +582,7 @@ def tcp_ping(ip: str, ports: List[int] = [80, 443, 22]) -> bool:
             pass
     return False
 
-def is_host_alive(ip: str, timeout: int = 3, use_tcp_fallback: bool = True) -> Tuple[bool, str]:
+def is_host_alive(ip: str, timeout: int = 2, use_tcp_fallback: bool = True) -> Tuple[bool, str]:
     """
     Check if a host is alive using ICMP ping, with optional TCP fallback.
     
@@ -577,9 +594,14 @@ def is_host_alive(ip: str, timeout: int = 3, use_tcp_fallback: bool = True) -> T
     Returns:
         Tuple of (is_alive, detection_method).
     """
+    cmd = ["ping", "-c", "1", "-i", str(timeout), ip]
+
+    if ":" in ip:
+        cmd = ["ping6", "-c", "1", "-i", str(timeout), ip]
+    
     try:
         response = subprocess.run(
-            ["ping", "-c", "1", "-W", str(timeout), ip],
+            cmd,
             capture_output=True,
             text=True
         )
@@ -696,7 +718,7 @@ def perform_ping_sweep(network_prefix: str, use_tcp_fallback: bool = True) -> Li
     Returns:
         List of alive hosts with their details.
     """
-    def check_host(host_num: int) -> Dict[str, str] | None:
+    def check_host(host_num: int) -> Optional[Dict[str, str]]:
         ip = f"{network_prefix}.{host_num}"
         is_alive, method = is_host_alive(ip, use_tcp_fallback=use_tcp_fallback)
         
@@ -714,7 +736,7 @@ def perform_ping_sweep(network_prefix: str, use_tcp_fallback: bool = True) -> Li
     
     print(f"Scanning network {network_prefix}.0/24...")
     
-    tasks = range(1, 255)
+    tasks = range(1, NETWORK_HOST_RANGE)
     results = run_tasks_concurrently(
         func=check_host,
         items=tasks,
@@ -790,10 +812,10 @@ def perform_host_discovery(local_ip: str, mode: str = "both") -> List[Dict[str, 
             if ip in all_hosts:
                 existing = all_hosts[ip]
                 
-                if host.get("mac") and host["mac"] != "N/A" and existing.get("mac") in ["N/A", "N/A", None]:
+                if host.get("mac") and host["mac"] != "N/A" and existing.get("mac") in ("N/A", None):
                     existing["mac"] = host["mac"]
                 
-                if host.get("hostname") and host["hostname"] != "N/A" and existing.get("hostname") in ["N/A", None]:
+                if host.get("hostname") and host["hostname"] != "N/A" and existing.get("hostname") in ("N/A", None):
                     existing["hostname"] = host["hostname"]
                 
                 existing["interface"] = host.get("interface", "N/A")
@@ -831,7 +853,7 @@ def display_discovery_results(hosts: List[Dict[str, str]]) -> None:
     
     print("-" * 30)
 
-    hosts_sorted = sorted(hosts, key=lambda x: tuple(map(int, x["ip"].split("."))))
+    hosts_sorted = sorted(hosts, key=lambda x: ipaddress.ip_address(x["ip"]))
 
     for host in hosts_sorted:
         ip = host.get("ip", "N/A")
@@ -863,7 +885,7 @@ def is_tcp_port_open(ip: str, port: int) -> bool:
     Returns:
         True if open, otherwise False.
     """
-    sock = create_socket(timeout=1)
+    sock = create_socket(ip=ip)
     result = sock.connect_ex((ip, port))
 
     sock.close()
@@ -882,19 +904,19 @@ def get_tcp_service_banner(ip: str, port: int) -> str:
         Banner string or status message.
     """
     try:
-        sock = create_socket(timeout=2)
+        sock = create_socket(ip=ip, timeout=3)
         sock.connect((ip, port))
 
         probe = SERVICE_PROBES.get(port, b"")
         if probe:
             sock.send(probe)
         
-        banner = sock.recv(1024).decode("utf-8", errors="ignore").strip()
+        banner = sock.recv(RECV_BUFFER_SIZE).decode("utf-8", errors="ignore").strip()
         
         if not banner and port in WEB_PORTS:
             try:
                 sock.send(b"GET / HTTP/1.0\r\nHost: " + ip.encode() + b"\r\n\r\n")
-                banner = sock.recv(1024).decode("utf-8", errors="ignore").strip()
+                banner = sock.recv(RECV_BUFFER_SIZE).decode("utf-8", errors="ignore").strip()
             except:
                 pass
 
@@ -928,7 +950,7 @@ def is_udp_port_open(ip: str, port: int) -> bool:
         True if a response is received (indicating open), otherwise False.
     """
     try:
-        sock = create_socket(socket.SOCK_DGRAM, timeout=1)
+        sock = create_socket(ip=ip, sock_type=socket.SOCK_DGRAM)
         
         probes = {
             53: b"\x00\x00\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07version\x04bind\x00\x00\x10\x00\x03",
@@ -959,7 +981,7 @@ def get_udp_service_banner(ip: str, port: int) -> str:
         Banner string or status message.
     """
     try:
-        sock = create_socket(socket.SOCK_DGRAM, timeout=2)
+        sock = create_socket(ip=ip, sock_type=socket.SOCK_DGRAM, timeout=2)
         
         probes = {
             53: b"\x00\x00\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07version\x04bind\x00\x00\x10\x00\x03",
@@ -986,7 +1008,7 @@ def get_udp_service_banner(ip: str, port: int) -> str:
     except Exception as e:
         return f"Error: {type(e).__name__}"
 
-def scan_single_port(target: str, port: int, protocol: str) -> Dict[str, Any] | None:
+def scan_single_port(target: str, port: int, protocol: str) -> Optional[Dict[str, Any]]:
     """
     Scan a single port and get banner if open/responsive.
 
@@ -1096,7 +1118,7 @@ def main():
         if scan_type == "1":
             # Host discovery
             discovery_mode = get_discovery_mode()
-            hosts = perform_host_discovery(local_ip, discovery_mode)
+            hosts = perform_host_discovery(target, discovery_mode)
             display_discovery_results(hosts)
 
         elif scan_type == "2":
