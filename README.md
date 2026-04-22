@@ -41,3 +41,6 @@ python3 scanner.py
 deactivate
 ```
 
+### Status
+This project is public while under active development.
+Expect changes, incomplete and/or experimental features.
