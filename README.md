@@ -1,4 +1,4 @@
-# 🚧 PyScan 🚧
+# PyScan
 ![Status](https://img.shields.io/badge/status-active_development-yellow)
 ![Python](https://img.shields.io/badge/python-3.x-blue)
 ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
