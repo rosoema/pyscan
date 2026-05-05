@@ -32,7 +32,6 @@ A lightweight network scanner.
 - macOS
 
 ### Installation
- 
 ```bash
 # Clone the repository
 git clone https://github.com/rosoema/pyscan.git
@@ -61,6 +60,6 @@ deactivate
 ```
 Follow the interactive prompts to configure your scan.
 
-### Status
+## Status
 This project is public while under active development.
 Expect changes, incomplete and experimental features.
