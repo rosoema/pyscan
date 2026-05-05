@@ -88,7 +88,7 @@ MAX_WORKERS = 100
 RECV_BUFFER_SIZE = 4096
 NETWORK_HOST_RANGE = 255
 
-### ----------- Common Utils ----------- ###
+### ----------- Validation Utils ----------- ###
 
 def validate_int(value: str, min_val: int = None, max_val: int = None, field_name: str = "Value") -> int:
     """
@@ -176,7 +176,7 @@ def parse_port_list(ports_str: str) -> List[int]:
     
     return ports
 
-### ----------- Progress & Threading Utils ----------- ###
+### ----------- Display & Progress Utilities ----------- ###
 
 def print_progress(current: int, total: int) -> None:
     """
@@ -202,6 +202,8 @@ def print_progress(current: int, total: int) -> None:
 def clear_line() -> None:
     """Clear the current terminal line."""
     print("\r" + " " * 80 + "\r", end="")
+
+### ----------- Threading & Concurrency----------- ###
 
 def get_max_workers(
     num_tasks: int,
@@ -285,19 +287,7 @@ def run_tasks_concurrently(
 
     return results
 
-def get_network_prefix(ip: str) -> str:
-    """
-    Extract network prefix from IP address.
-    
-    Args:
-        ip: IP address string.
-    
-    Returns:
-        Network prefix (e.g., "192.168.1" from "192.168.1.10").
-    """
-    return ".".join(ip.split(".")[:3])
-
-### ----------- Socket Utils ----------- ###
+### ----------- Socket Creation & Management ----------- ###
 
 def create_socket(ip: str = None, sock_type=socket.SOCK_STREAM, timeout: int = 1) -> socket.socket:
     """
@@ -316,26 +306,87 @@ def create_socket(ip: str = None, sock_type=socket.SOCK_STREAM, timeout: int = 1
 
     return sock
 
-def get_local_info() -> Tuple[str, str]:
-    """
-    Determine the local IP address and hostname of the machine.
+### ----------- Network & System Information ----------- ###
 
+def get_network_prefix(ip: str) -> str:
+    """
+    Extract network prefix from IP address.
+    
+    Args:
+        ip: IP address string.
+    
     Returns:
-        Tuple of (hostname, local IP address), or ("N/A", "127.0.0.1") if fail.
+        Network prefix (e.g., "192.168.1" from "192.168.1.10").
+    """
+    return ".".join(ip.split(".")[:3])
+
+def get_active_interface() -> str:
+    """
+    Get the active network interface (the one with the default route).
+    
+    Returns:
+        Interface name (e.g., 'en0', 'en1') or 'en0' as fallback.
     """
     try:
-        sock = create_socket(sock_type=socket.SOCK_DGRAM)
-        sock.connect(("8.8.8.8", 80))
+        result = subprocess.run(
+            ['route', '-n', 'get', 'default'],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        match = re.search(r'interface: (\S+)', result.stdout)
+        return match.group(1) if match else "en0"
+    except Exception:
+        return "en0"
 
+
+def get_network_info(interface: str = None) -> Tuple[str, str, str, str, int, ipaddress.IPv4Network]:
+    """
+    Get network information for the specified interface.
+    If no interface is provided, automatically detects the active interface.
+    
+    Returns:
+        Tuple of (hostname, ip, netmask_hex, broadcast, cidr, network)
+        or ("N/A", "127.0.0.1", "0xffffff00", "127.0.0.255", 24, network_obj) on failure.
+    """
+    try:
+        if interface is None:
+            interface = get_active_interface()
+        
         hostname = socket.gethostname()
-        ip = sock.getsockname()[0]
-
-        sock.close()
-
-        return hostname, ip
+        
+        result = subprocess.run(
+            ['ifconfig', interface], 
+            capture_output=True, 
+            text=True,
+            check=True
+        )
+        
+        match = re.search(
+            r'inet (\S+) netmask (0x[0-9a-f]+) broadcast (\S+)', 
+            result.stdout
+        )
+        
+        if not match:
+            raise ValueError(f"Could not parse network info from {interface}")
+        
+        ip = match.group(1)
+        netmask_hex = match.group(2)
+        broadcast = match.group(3)
+        
+        netmask_int = int(netmask_hex, 16)
+        cidr = bin(netmask_int).count('1')
+        network = ipaddress.IPv4Network(f"{ip}/{cidr}", strict=False)
+        
+        return hostname, ip, netmask_hex, broadcast, cidr, network
+    except subprocess.CalledProcessError:
+        print(f"Error: Interface {interface} not found.")
+        fallback_network = ipaddress.IPv4Network("127.0.0.1/24", strict=False)
+        return "N/A", "127.0.0.1", "0xffffff00", "127.0.0.255", 24, fallback_network
     except Exception as e:
-        print(f"Error: {e}.")
-        return "N/A", "127.0.0.1"
+        print(f"Error getting network info: {e}.")
+        fallback_network = ipaddress.IPv4Network("127.0.0.1/24", strict=False)
+        return "N/A", "127.0.0.1", "0xffffff00", "127.0.0.255", 24, fallback_network
 
 ### ----------- Port Mode Helpers ----------- ###
 
@@ -554,7 +605,7 @@ def resolve_port_mode(protocol: str, mode_choice: str) -> Tuple[Iterable[int], s
     ports, description = resolver(protocol)
     return ports, description
 
-### ----------- Enhanced Host Discovery ----------- ###
+### ----------- Host Discovery ----------- ###
 
 def tcp_ping(ip: str, ports: List[int] | None = None) -> bool:
     """
@@ -1106,10 +1157,14 @@ def main():
         print("Welcome to PyScan!".center(30))
         print("=" * 30 + "\n")
 
-        hostname, local_ip = get_local_info()
+        hostname, local_ip, netmask_hex, broadcast, cidr, network = get_network_info()
 
         print(f"Hostname: {hostname}")
         print(f"Your IP: {local_ip}")
+        print(f"Network: {network}")
+        print(f"Broadcast: {broadcast}")
+        print(f"Netmask: {netmask_hex}. CIDR: {cidr}.")
+        print(f"Usable IPs: {network.num_addresses - 2}")
 
         target = get_target_ip(local_ip)
 
