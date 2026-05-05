@@ -758,7 +758,7 @@ def get_arp_table() -> List[Dict[str, str]]:
         print(f"ARP scan error: {e}")
         return []
 
-def perform_ping_sweep(network_prefix: str, use_tcp_fallback: bool = True) -> List[Dict[str, str]]:
+def perform_ping_sweep(network_prefix: str, usable_ips: int, use_tcp_fallback: bool = True) -> List[Dict[str, str]]:
     """
     Perform ping sweep on a network with TCP fallback for firewall evasion.
     
@@ -785,9 +785,7 @@ def perform_ping_sweep(network_prefix: str, use_tcp_fallback: bool = True) -> Li
             }
         return None
     
-    print(f"Scanning network {network_prefix}.0/24...")
-    
-    tasks = range(1, NETWORK_HOST_RANGE)
+    tasks = range(1, usable_ips + 1)
     results = run_tasks_concurrently(
         func=check_host,
         items=tasks,
@@ -827,7 +825,7 @@ def get_discovery_mode() -> str:
     
     return "both"
 
-def perform_host_discovery(local_ip: str, mode: str = "both") -> List[Dict[str, str]]:
+def perform_host_discovery(local_ip: str, cidr: int, usable_ips: int, mode: str = "both") -> List[Dict[str, str]]:
     """
     Perform host discovery using selected methods.
 
@@ -844,9 +842,8 @@ def perform_host_discovery(local_ip: str, mode: str = "both") -> List[Dict[str, 
     
     if mode in ["ping", "both"]:
         network_prefix = get_network_prefix(local_ip)
-        step_num = 2 if mode == "both" else 1
-        print(f"\n[{step_num}/2] Running ping sweep on {network_prefix}.0/24...")
-        ping_hosts = perform_ping_sweep(network_prefix, use_tcp_fallback=True)
+        print(f"\nRunning ping sweep on {network_prefix}.0/{cidr}...")
+        ping_hosts = perform_ping_sweep(network_prefix, usable_ips, use_tcp_fallback=True)
         
         for host in ping_hosts:
             all_hosts[host["ip"]] = host
@@ -854,7 +851,7 @@ def perform_host_discovery(local_ip: str, mode: str = "both") -> List[Dict[str, 
         print(f"\nFound {len(ping_hosts)} hosts via ping")
     
     if mode in ["arp", "both"]:
-        print("\n[1/2] Running ARP scan...")
+        print("\nRunning ARP scan...")
         arp_hosts = get_arp_table()
         
         for host in arp_hosts:
@@ -1159,12 +1156,15 @@ def main():
 
         hostname, local_ip, netmask_hex, broadcast, cidr, network = get_network_info()
 
+        usable_ips = network.num_addresses - 2
+
         print(f"Hostname: {hostname}")
         print(f"Your IP: {local_ip}")
         print(f"Network: {network}")
         print(f"Broadcast: {broadcast}")
-        print(f"Netmask: {netmask_hex}. CIDR: {cidr}.")
-        print(f"Usable IPs: {network.num_addresses - 2}")
+        print(f"Netmask: {netmask_hex}")
+        print(f"CIDR: {cidr}")
+        print(f"Usable IPs: {usable_ips}")
 
         target = get_target_ip(local_ip)
 
@@ -1173,7 +1173,7 @@ def main():
         if scan_type == "1":
             # Host discovery
             discovery_mode = get_discovery_mode()
-            hosts = perform_host_discovery(target, discovery_mode)
+            hosts = perform_host_discovery(target, cidr, usable_ips, discovery_mode)
             display_discovery_results(hosts)
 
         elif scan_type == "2":
