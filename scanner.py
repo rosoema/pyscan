@@ -119,7 +119,7 @@ def validate_int(value: str, min_val: int = None, max_val: int = None, field_nam
     
     return num
 
-def validate_ip(ip: str, allow_ipv6: bool = True) -> str:
+def validate_ip(ip: str) -> str:
     """
     Validate IP address format.
     
@@ -137,13 +137,6 @@ def validate_ip(ip: str, allow_ipv6: bool = True) -> str:
         return ip
     except socket.error:
         pass
-    
-    if allow_ipv6:
-        try:
-            socket.inet_pton(socket.AF_INET6, ip)
-            return ip
-        except socket.error:
-            pass
 
     raise ValueError(f"Invalid IP address format: '{ip}'.")
 
@@ -300,8 +293,7 @@ def create_socket(ip: str = None, sock_type=socket.SOCK_STREAM, timeout: int = 1
     Returns:
         Configured socket instance.
     """
-    family = socket.AF_INET6 if ip and ":" in ip else socket.AF_INET
-    sock = socket.socket(family, sock_type)
+    sock = socket.socket(socket.AF_INET, sock_type)
     sock.settimeout(timeout)
 
     return sock
@@ -380,11 +372,13 @@ def get_network_info(interface: str = None) -> Tuple[str, str, str, str, int, ip
         
         return hostname, ip, netmask_hex, broadcast, cidr, network
     except subprocess.CalledProcessError:
-        print(f"Error: Interface {interface} not found.")
+        print(f"\nError: Interface {interface} not found.")
+        print("\nReturning fallback values.")
         fallback_network = ipaddress.IPv4Network("127.0.0.1/24", strict=False)
         return "N/A", "127.0.0.1", "0xffffff00", "127.0.0.255", 24, fallback_network
     except Exception as e:
-        print(f"Error getting network info: {e}.")
+        print(f"\nError getting network info: {e}.")
+        print("\nReturning fallback values.")
         fallback_network = ipaddress.IPv4Network("127.0.0.1/24", strict=False)
         return "N/A", "127.0.0.1", "0xffffff00", "127.0.0.255", 24, fallback_network
 
@@ -646,9 +640,6 @@ def is_host_alive(ip: str, timeout: int = 2, use_tcp_fallback: bool = True) -> T
         Tuple of (is_alive, detection_method).
     """
     cmd = ["ping", "-c", "1", "-i", str(timeout), ip]
-
-    if ":" in ip:
-        cmd = ["ping6", "-c", "1", "-i", str(timeout), ip]
     
     try:
         response = subprocess.run(
@@ -758,7 +749,7 @@ def get_arp_table() -> List[Dict[str, str]]:
         print(f"ARP scan error: {e}")
         return []
 
-def perform_ping_sweep(network_prefix: str, usable_ips: int, use_tcp_fallback: bool = True) -> List[Dict[str, str]]:
+def perform_ping_sweep(network_prefix: str, usable_ips: int = NETWORK_HOST_RANGE, use_tcp_fallback: bool = True) -> List[Dict[str, str]]:
     """
     Perform ping sweep on a network with TCP fallback for firewall evasion.
     
@@ -1158,7 +1149,7 @@ def main():
 
         usable_ips = network.num_addresses - 2
 
-        print(f"Hostname: {hostname}")
+        print(f"\nHostname: {hostname}")
         print(f"Your IP: {local_ip}")
         print(f"Network: {network}")
         print(f"Broadcast: {broadcast}")
