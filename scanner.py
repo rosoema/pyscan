@@ -21,72 +21,9 @@ import ipaddress
 from typing import Iterable, Tuple, Callable, List, Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-### ----------- Constants ----------- ###
+from config import MIN_PORT, MAX_PORT, MAX_INPUT_RETRIES, MAX_WORKERS, RECV_BUFFER_SIZE, NETWORK_HOST_RANGE, WEB_PORTS, COMMON_UDP_PORTS, SERVICE_PROBES, COMMON_SERVICES
 
-WEB_PORTS = {
-    80,
-    443,
-    8000,
-    8080,
-    8443,
-    8888,
-    3000,
-    5000,
-    9000,
-    7000,
-    81,
-    591,
-    593,
-    7070,
-}
-
-COMMON_UDP_PORTS = {
-    53,
-    67,
-    68,
-    69,
-    123,
-    161,
-    500,
-    514,
-    1194,
-    5060,
-    5061,
-    1812,
-    1813
-}
-
-SERVICE_PROBES = {
-    21: b"", 
-    22: b"",
-    23: b"", 
-    25: b"EHLO pyscan\r\n", 
-    80: b"GET / HTTP/1.0\r\n\r\n",
-    110: b"",  
-    143: b"",  
-    443: b"GET / HTTP/1.0\r\n\r\n",  
-    3306: b"",  
-    5432: b"", 
-    6379: b"PING\r\n",
-    8080: b"GET / HTTP/1.0\r\n\r\n", 
-}
-
-COMMON_SERVICES = {
-    20: "ftp-data", 21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp",
-    53: "dns", 80: "http", 110: "pop3", 143: "imap", 443: "https",
-    445: "microsoft-ds", 3306: "mysql", 3389: "rdp", 5432: "postgresql",
-    5900: "vnc", 6379: "redis", 8080: "http-proxy", 8443: "https-alt",
-    27017: "mongodb", 5000: "upnp", 8000: "http-alt",
-}
-
-MIN_PORT, MAX_PORT = 1, 65535
-
-MAX_INPUT_RETRIES = 3
-
-MAX_WORKERS = 100
-
-RECV_BUFFER_SIZE = 4096
-NETWORK_HOST_RANGE = 255
+from models import PortResult, Host
 
 ### ----------- Validation Utils ----------- ###
 
@@ -749,7 +686,11 @@ def get_arp_table() -> List[Dict[str, str]]:
         print(f"ARP scan error: {e}")
         return []
 
-def perform_ping_sweep(network_prefix: str, usable_ips: int = NETWORK_HOST_RANGE, use_tcp_fallback: bool = True) -> List[Dict[str, str]]:
+def perform_ping_sweep(
+        network_prefix: str, 
+        usable_ips: int = 
+        NETWORK_HOST_RANGE, 
+        use_tcp_fallback: bool = True) -> list[Host]:
     """
     Perform ping sweep on a network with TCP fallback for firewall evasion.
     
@@ -760,25 +701,22 @@ def perform_ping_sweep(network_prefix: str, usable_ips: int = NETWORK_HOST_RANGE
     Returns:
         List of alive hosts with their details.
     """
-    def check_host(host_num: int) -> Optional[Dict[str, str]]:
+    def check_host(host_num: int) -> Host | None:
         ip = f"{network_prefix}.{host_num}"
         is_alive, method = is_host_alive(ip, use_tcp_fallback=use_tcp_fallback)
-        
-        if is_alive:
-            hostname = resolve_hostname(ip)
-            mac = "N/A"
-            
-            return {
-                "ip": ip,
-                "hostname": hostname,
-                "mac": mac,
-                "method": method
-            }
-        return None
+
+        if not is_alive:
+            return None
+
+        return Host(
+            ip=ip,
+            hostname=resolve_hostname(ip),
+            method=method,
+        )
     
     tasks = range(1, usable_ips + 1)
     results = run_tasks_concurrently(
-        func=check_host,
+        check_host,
         items=tasks,
         show_progress=True
     )
@@ -816,7 +754,7 @@ def get_discovery_mode() -> str:
     
     return "both"
 
-def perform_host_discovery(local_ip: str, cidr: int, usable_ips: int, mode: str = "both") -> List[Dict[str, str]]:
+def perform_host_discovery(local_ip: str, cidr: int, usable_ips: int, mode: str = "both") -> List[Host]:
     """
     Perform host discovery using selected methods.
 
@@ -829,7 +767,7 @@ def perform_host_discovery(local_ip: str, cidr: int, usable_ips: int, mode: str 
     """
     print(f"\nPerforming host discovery...")
     
-    all_hosts = {}
+    all_hosts: Dict[str, Host] = {}
     
     if mode in ["ping", "both"]:
         network_prefix = get_network_prefix(local_ip)
@@ -837,7 +775,7 @@ def perform_host_discovery(local_ip: str, cidr: int, usable_ips: int, mode: str 
         ping_hosts = perform_ping_sweep(network_prefix, usable_ips, use_tcp_fallback=True)
         
         for host in ping_hosts:
-            all_hosts[host["ip"]] = host
+            all_hosts[host.ip] = host
         
         print(f"\nFound {len(ping_hosts)} hosts via ping")
     
@@ -845,33 +783,54 @@ def perform_host_discovery(local_ip: str, cidr: int, usable_ips: int, mode: str 
         print("\nRunning ARP scan...")
         arp_hosts = get_arp_table()
         
-        for host in arp_hosts:
-            ip = host["ip"]
+        for arp_host in arp_hosts:
+            ip = arp_host["ip"]
             
             if ip in all_hosts:
                 existing = all_hosts[ip]
-                
-                if host.get("mac") and host["mac"] != "N/A" and existing.get("mac") in ("N/A", None):
-                    existing["mac"] = host["mac"]
-                
-                if host.get("hostname") and host["hostname"] != "N/A" and existing.get("hostname") in ("N/A", None):
-                    existing["hostname"] = host["hostname"]
-                
-                existing["interface"] = host.get("interface", "N/A")
-                existing["flags"] = host.get("flags", "N/A")
-                existing["link_type"] = host.get("link_type", "N/A")
-                existing["state"] = host.get("state", "N/A")
-                
-                ping_method = existing.get("method", "")
-                existing["method"] = f"{ping_method} + ARP"
+
+                if (
+                    arp_host.get("mac")
+                    and arp_host["mac"] != "N/A"
+                    and getattr(existing, "mac", None) in ("N/A", None)
+                ):
+                    existing.mac = arp_host["mac"]
+
+                if (
+                    arp_host.get("hostname")
+                    and arp_host["hostname"] != "N/A"
+                    and getattr(existing, "hostname", None) in ("N/A", None)
+                ):
+                    existing.hostname = arp_host["hostname"]
+
+                if hasattr(existing, "interface"):
+                    existing.interface = arp_host.get("interface", "N/A")
+
+                if hasattr(existing, "flags"):
+                    existing.flags = arp_host.get("flags", "N/A")
+
+                if hasattr(existing, "link_type"):
+                    existing.link_type = arp_host.get("link_type", "N/A")
+
+                if hasattr(existing, "state"):
+                    existing.state = arp_host.get("state", "N/A")
+
+                current_method = getattr(existing, "method", "")
+                existing.method = f"{current_method} + ARP"
+
             else:
-                all_hosts[ip] = host
+                all_hosts[ip] = Host(
+                    ip=arp_host["ip"],
+                    hostname=arp_host.get("hostname", "N/A"),
+                    mac=arp_host.get("mac", "N/A"),
+                    method=arp_host.get("method", "ARP"),
+                )
         
         print(f"Found {len(arp_hosts)} hosts via ARP")
     
     return list(all_hosts.values())
 
-def display_discovery_results(hosts: List[Dict[str, str]]) -> None:
+def display_discovery_results(hosts: List[Host]) -> None:
     """
     Display host discovery results in a formatted table.
     
@@ -892,17 +851,20 @@ def display_discovery_results(hosts: List[Dict[str, str]]) -> None:
     
     print("-" * 30)
 
-    hosts_sorted = sorted(hosts, key=lambda x: ipaddress.ip_address(x["ip"]))
+    hosts_sorted = sorted(
+        hosts, 
+        key=lambda x: ipaddress.ip_address(x.ip)
+    )
 
     for host in hosts_sorted:
-        ip = host.get("ip", "N/A")
-        hostname = host.get("hostname", "N/A")[:25]
-        mac = host.get("mac", "N/A")
-        method = host.get("method", "N/A")
-        interface = host.get("interface", "N/A")
-        flags = host.get("flags", "N/A")
-        link_type = host.get("link_type", "N/A")
-        state = host.get("state", "N/A")
+        ip = getattr(host, "ip", "N/A")
+        hostname = getattr(host, "hostname", "N/A")[:25]
+        mac = getattr(host, "mac", "N/A")
+        method = getattr(host, "method", "N/A")
+        interface = getattr(host, "interface", "N/A")
+        flags = getattr(host, "flags", "N/A")
+        link_type = getattr(host, "link_type", "N/A")
+        state = getattr(host, "state", "N/A")
 
         print(f"{ip:<15} | {hostname:<25} | {mac:<20} | {method:<12} | "
               f"{interface:<10} | {flags:<17} | {link_type:<11} | {state:<8}")
@@ -1047,7 +1009,7 @@ def get_udp_service_banner(ip: str, port: int) -> str:
     except Exception as e:
         return f"Error: {type(e).__name__}"
 
-def scan_single_port(target: str, port: int, protocol: str) -> Optional[Dict[str, Any]]:
+def scan_single_port(target: str, port: int, protocol: str) -> PortResult | None:
     """
     Scan a single port and get banner if open/responsive.
 
@@ -1059,27 +1021,26 @@ def scan_single_port(target: str, port: int, protocol: str) -> Optional[Dict[str
     Returns:
         dict: If open/responsive with port, banner, and service info, else None.
     """
+
+    banner = None
+
     if protocol == "tcp":
         if is_tcp_port_open(target, port):
             banner = get_tcp_service_banner(target, port)
-            service = COMMON_SERVICES.get(port, "N/A")
-            return {
-                "port": port,
-                "banner": banner,
-                "service": service
-            }
     elif protocol == "udp":
         if is_udp_port_open(target, port):
             banner = get_udp_service_banner(target, port)
-            service = COMMON_SERVICES.get(port, "N/A")
-            return {
-                "port": port,
-                "banner": banner,
-                "service": service
-            }
     else:
         raise ValueError(f"Unsupported protocol: {protocol}")
-    return None
+
+    if not banner:
+        return None
+
+    return PortResult(
+        port=port,
+        service=COMMON_SERVICES.get(port, "N/A"),
+        banner=banner,
+    )
 
 def scan_ports(target: str, ports: Iterable[int], label: str, protocol: str = "tcp") -> List[dict]:
     """
@@ -1120,7 +1081,7 @@ def display_port_scan_results(results: List[dict], protocol: str) -> None:
 
     print("\n" + "=" * 100)
     if results:
-        results_sorted = sorted(results, key=lambda x: x['port'])
+        results_sorted = sorted(results, key=lambda x: x.port)
         
         headers = f"{'Port':>5} | {'Service':<15} | Banner"
         print(f"Scan COMPLETE. Found {len(results)} open {protocol.upper()} port(s):")
@@ -1128,7 +1089,7 @@ def display_port_scan_results(results: List[dict], protocol: str) -> None:
         print("-" * 100)
         
         for r in results_sorted:
-            port = r['port']
+            port = r.port
             service = r.get('service', 'N/A')[:15]
             banner = r.get('banner', 'N/A')
             print(f"{port:5d} | {service:<15} | {banner}")
