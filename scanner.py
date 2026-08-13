@@ -18,93 +18,14 @@ import subprocess
 import re
 import ipaddress
 
-from typing import Iterable, Tuple, Callable, List, Dict, Any, Optional
+from typing import Iterable, Tuple, Callable, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import MIN_PORT, MAX_PORT, MAX_INPUT_RETRIES, MAX_WORKERS, RECV_BUFFER_SIZE, NETWORK_HOST_RANGE, WEB_PORTS, COMMON_UDP_PORTS, SERVICE_PROBES, COMMON_SERVICES
 
 from models import PortResult, Host
 
-### ----------- Validation Utils ----------- ###
-
-def validate_int(value: str, min_val: int = None, max_val: int = None, field_name: str = "Value") -> int:
-    """
-    Convert a string to an integer with optional range validation.
-    
-    Args:
-        value: String to convert.
-        min_val: Minimum value (inclusive).
-        max_val: Maximum value (inclusive).
-        field_name: Name of field.
-    
-    Returns:
-        Validated integer.
-
-    Raises:
-        ValueError: If conversion fails, or out of range.
-    """
-    try:
-        num = int(value)
-    except:
-        raise ValueError(f"{field_name} must be a valid integer, got: '{value}'.")
-    
-    if min_val is not None and num < min_val:
-        raise ValueError(f"{field_name} must be >= {min_val}, got: {num}.")
-    
-    if max_val is not None and num > max_val:
-        raise ValueError(f"{field_name} must be <= {max_val}, got: {num}.")
-    
-    return num
-
-def validate_ip(ip: str) -> str:
-    """
-    Validate IP address format.
-    
-    Args:
-        ip: IP string.
-    
-    Returns:
-        Validated IP.
-    
-    Raises:
-        ValueError: If IP format is invalid.
-    """
-    try:
-        socket.inet_aton(ip)
-        return ip
-    except socket.error:
-        pass
-
-    raise ValueError(f"Invalid IP address format: '{ip}'.")
-
-def parse_port_list(ports_str: str) -> List[int]:
-    """
-    Parse comma-separated port list with validation.
-    
-    Args:
-        ports_str: Comma-separated port numbers.
-    
-    Returns:
-        List of valid port numbers.
-    
-    Raises:
-        ValueError: If any port is invalid.
-    """
-    if not ports_str.strip():
-        raise ValueError("Port list cannot be empty.")
-    
-    ports = []
-    for item in ports_str.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        port = validate_int(item, MIN_PORT, MAX_PORT, "Port")
-        ports.append(port)
-    
-    if not ports:
-        raise ValueError("No valid ports provided.")
-    
-    return ports
+from utils.validation import validate_int, validate_ip, parse_port_list
 
 ### ----------- Display & Progress Utilities ----------- ###
 
@@ -170,7 +91,7 @@ def run_tasks_concurrently(
     items: Iterable,
     max_workers: int | None = None,
     show_progress: bool = False,
-) -> List[Any]:
+) -> list[Any]:
     """
     Run tasks concurrently.
 
@@ -185,7 +106,7 @@ def run_tasks_concurrently(
     Returns:
         List of results (excluding None), according to completion.
     """
-    results: List[Any] = []
+    results: list[Any] = []
     items = list(items)
     total = len(items)
     completed = 0
@@ -538,7 +459,7 @@ def resolve_port_mode(protocol: str, mode_choice: str) -> Tuple[Iterable[int], s
 
 ### ----------- Host Discovery ----------- ###
 
-def tcp_ping(ip: str, ports: List[int] | None = None) -> bool:
+def tcp_ping(ip: str, ports: list[int] | None = None) -> bool:
     """
     Perform TCP ping by attempting SYN connection to common ports.
     Useful if ICMP is blocked.
@@ -626,7 +547,7 @@ def resolve_hostname(ip: str, provided_hostname: str = None, timeout: int = 1) -
 
     return "N/A"
 
-def get_arp_table() -> List[Host]:
+def get_arp_table() -> list[Host]:
     """
     Perform ARP scan and parse results into structured data.
     More reliable than ICMP for local network discovery.
@@ -641,7 +562,7 @@ def get_arp_table() -> List[Host]:
             text=True
         )
 
-        hosts: List[Host] = []
+        hosts: list[Host] = []
 
         arp_regex = re.compile(
             r"(\S+)\s+\((\d+\.\d+\.\d+\.\d+)\)\s+at\s+(?:\(incomplete\)|([0-9a-fA-F:]+))\s+on\s+(\S+)\s+([^[]+?)\s*\[(\w+)\]"
@@ -693,7 +614,7 @@ def perform_ping_sweep(
         network_prefix: str, 
         usable_ips: int = 
         NETWORK_HOST_RANGE, 
-        use_tcp_fallback: bool = True) -> List[Host]:
+        use_tcp_fallback: bool = True) -> list[Host]:
     """
     Perform ping sweep on a network with TCP fallback for firewall evasion.
     
@@ -757,7 +678,7 @@ def get_discovery_mode() -> str:
     
     return "both"
 
-def perform_host_discovery(local_ip: str, cidr: int, usable_ips: int, mode: str = "both") -> List[Host]:
+def perform_host_discovery(local_ip: str, cidr: int, usable_ips: int, mode: str = "both") -> list[Host]:
     """
     Perform host discovery using selected methods.
 
@@ -823,7 +744,7 @@ def perform_host_discovery(local_ip: str, cidr: int, usable_ips: int, mode: str 
     
     return list(all_hosts.values())
 
-def display_discovery_results(hosts: List[Host]) -> None:
+def display_discovery_results(hosts: list[Host]) -> None:
     """
     Display host discovery results in a formatted table.
     
@@ -1035,7 +956,7 @@ def scan_single_port(target: str, port: int, protocol: str) -> PortResult | None
         banner=banner,
     )
 
-def scan_ports(target: str, ports: Iterable[int], label: str, protocol: str = "tcp") -> List[dict]:
+def scan_ports(target: str, ports: Iterable[int], label: str, protocol: str = "tcp") -> list[dict]:
     """
     Scan a target for open ports.
 
@@ -1060,7 +981,7 @@ def scan_ports(target: str, ports: Iterable[int], label: str, protocol: str = "t
     
     return results
 
-def display_port_scan_results(results: List[dict], protocol: str) -> None:
+def display_port_scan_results(results: list[dict], protocol: str) -> None:
     """
     Display port scan results in a formatted table with service information.
     
