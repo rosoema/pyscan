@@ -626,7 +626,7 @@ def resolve_hostname(ip: str, provided_hostname: str = None, timeout: int = 1) -
 
     return "N/A"
 
-def get_arp_table() -> List[Dict[str, str]]:
+def get_arp_table() -> List[Host]:
     """
     Perform ARP scan and parse results into structured data.
     More reliable than ICMP for local network discovery.
@@ -641,7 +641,7 @@ def get_arp_table() -> List[Dict[str, str]]:
             text=True
         )
 
-        hosts = []
+        hosts: List[Host] = []
 
         arp_regex = re.compile(
             r"(\S+)\s+\((\d+\.\d+\.\d+\.\d+)\)\s+at\s+(?:\(incomplete\)|([0-9a-fA-F:]+))\s+on\s+(\S+)\s+([^[]+?)\s*\[(\w+)\]"
@@ -670,16 +670,19 @@ def get_arp_table() -> List[Dict[str, str]]:
             
             state = "offline" if mac is None else "online"
             
-            hosts.append({
-                "ip": ip,
-                "mac": mac if mac else "N/A",
-                "hostname": hostname,
-                "interface": interface,
-                "flags": flags.strip() if flags else "",
-                "link_type": link_type if link_type else "",
-                "state": state,
-                "method": "ARP"
-            })
+            hosts.append(
+                Host(
+                    ip=ip,
+                    mac=mac if mac else "N/A",
+                    hostname=hostname,
+                    interface=interface,
+                    flags=flags.strip() if flags else "N/A",
+                    link_type=link_type if link_type else "N/A",
+                    state=state,
+                    method="ARP",
+                )
+            )
+
         return hosts
 
     except Exception as e:
@@ -690,7 +693,7 @@ def perform_ping_sweep(
         network_prefix: str, 
         usable_ips: int = 
         NETWORK_HOST_RANGE, 
-        use_tcp_fallback: bool = True) -> list[Host]:
+        use_tcp_fallback: bool = True) -> List[Host]:
     """
     Perform ping sweep on a network with TCP fallback for firewall evasion.
     
@@ -784,47 +787,37 @@ def perform_host_discovery(local_ip: str, cidr: int, usable_ips: int, mode: str 
         arp_hosts = get_arp_table()
         
         for arp_host in arp_hosts:
-            ip = arp_host["ip"]
-            
+            ip = arp_host.ip
+
             if ip in all_hosts:
                 existing = all_hosts[ip]
 
-                if (
-                    arp_host.get("mac")
-                    and arp_host["mac"] != "N/A"
-                    and getattr(existing, "mac", None) in ("N/A", None)
-                ):
-                    existing.mac = arp_host["mac"]
+                if arp_host.mac != "N/A" and existing.mac in ("N/A", None):
+                    existing.mac = arp_host.mac
 
-                if (
-                    arp_host.get("hostname")
-                    and arp_host["hostname"] != "N/A"
-                    and getattr(existing, "hostname", None) in ("N/A", None)
-                ):
-                    existing.hostname = arp_host["hostname"]
+                if arp_host.hostname != "N/A" and existing.hostname in ("N/A", None):
+                    existing.hostname = arp_host.hostname
 
-                if hasattr(existing, "interface"):
-                    existing.interface = arp_host.get("interface", "N/A")
+                if arp_host.interface != "N/A":
+                    existing.interface = arp_host.interface
 
-                if hasattr(existing, "flags"):
-                    existing.flags = arp_host.get("flags", "N/A")
+                if arp_host.flags != "N/A":
+                    existing.flags = arp_host.flags
 
-                if hasattr(existing, "link_type"):
-                    existing.link_type = arp_host.get("link_type", "N/A")
+                if arp_host.link_type != "N/A":
+                    existing.link_type = arp_host.link_type
 
-                if hasattr(existing, "state"):
-                    existing.state = arp_host.get("state", "N/A")
+                if arp_host.state != "N/A":
+                    existing.state = arp_host.state
 
-                current_method = getattr(existing, "method", "")
-                existing.method = f"{current_method} + ARP"
+                existing.method = (
+                    f"{existing.method} + ARP"
+                    if existing.method
+                    else "ARP"
+                )
 
             else:
-                all_hosts[ip] = Host(
-                    ip=arp_host["ip"],
-                    hostname=arp_host.get("hostname", "N/A"),
-                    mac=arp_host.get("mac", "N/A"),
-                    method=arp_host.get("method", "ARP"),
-                )
+                all_hosts[ip] = arp_host
         
         print(f"Found {len(arp_hosts)} hosts via ARP")
     
