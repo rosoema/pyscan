@@ -1,4 +1,4 @@
-# pyscan/ports/scanner.py
+# pyscan/ports/modes.py
 
 from typing import Iterable, Tuple
 
