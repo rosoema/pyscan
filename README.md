@@ -53,7 +53,7 @@ pip install -r requirements.txt
 source venv/bin/activate
  
 # Run
-python3 scanner.py
+python3 main.py
  
 # End
 deactivate
