@@ -1,4 +1,4 @@
-# pyscan/utils/progress.py
+# pyscan/utils/terminal.py
 
 
 def print_progress(current: int, total: int) -> None:

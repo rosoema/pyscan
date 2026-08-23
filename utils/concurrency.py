@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import MAX_WORKERS
 
-from utils.progress import print_progress
+from utils.terminal import print_progress
 
 
 def get_max_workers(

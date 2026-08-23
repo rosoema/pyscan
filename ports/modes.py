@@ -72,43 +72,6 @@ def port_specific_ports(protocol: str) -> Tuple[Iterable[int], str]:
     else:
         print("Max retries exceeded. Using default (common UDP ports).")
         return port_common("udp")
-    
-def get_port_mode(protocol: str) -> str:
-    """
-    Display port mode options for the given protocol and return user choice.
-
-    Args:
-        protocol: "tcp" or "udp".
-
-    Returns:
-        Selected mode key as a string.
-    """
-    PORT_MODES = {
-        "1": ("Common ports", port_common),
-        "2": ("Extended range (1-10000)", port_extended),
-        "3": ("All ports (1-65535)", port_all),
-        "4": ("Custom range", port_custom_range),
-        "5": ("Specific ports", port_specific_ports),
-    }
-    
-    proto_upper = protocol.upper()
-    print(f"\n{proto_upper} port range options:")
-    for key, (name, _) in PORT_MODES.items():
-        print(f"  {key}. {name}")
-    
-    for attempt in range(MAX_INPUT_RETRIES):
-        choice = input("Choose option (1-5, default: 1): ").strip() or "1"
-        
-        if choice in PORT_MODES:
-            return choice
-        
-        print(f"Error: Invalid choice '{choice}'.")
-        if attempt < MAX_INPUT_RETRIES - 1:
-            print("Please try again.")
-        else:
-            print("Max retries exceeded. Using default (1).")
-    
-    return "1"
 
 def resolve_port_mode(protocol: str, mode_choice: str) -> Tuple[Iterable[int], str]:
     """
